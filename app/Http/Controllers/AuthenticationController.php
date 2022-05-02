@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Helpers\ValidationHelper;
 use App\Http\Controllers\BaseApiController;
 use App\Http\HttpCode;
+use App\Models\User;
 use Illuminate\Contracts\Support\Renderable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,76 +17,54 @@ use RuntimeException;
 
 final class AuthenticationController extends BaseApiController
 {
-    public function login(): JsonResponse
+
+    public function register(Request $request) 
     {
-        $data = request()->all();
+        return "ok";
+        return $request;
+        $user = User::where('email', $request->email)->first();
 
-        try {
-            ValidationHelper::validate($data, [
-                'email' => 'required|email',
-                'password' => 'required'
-            ]);
-
-            if (Auth::attempt(['email' => $data['email'], 'password' => $data['password']])) {
-                $user = UserRepository::currentUser();
-                $email = $user->email ?? '';
-                $success = [];
-                $success['token'] = $user->createToken('passport-api')->accessToken;
-                $user->setRememberToken(base64_encode(Hash::make(time() . $email)));
-                $success['rememberToken'] = $user->getRememberToken();
-
-                if ($user->save()) {
-                    return $this->respond(['success' => $success]);
-                }
+        $message  = new User();
+        if (!$user) {
+            $user = new User();
+            $user->email = $request->email;
+            $user->password = Hash::make($request->password);
+            $user->role = $request->role;
+            if($user->save()){
+                $message->result = true;
+                $message->message = 'Register Successfully Done';
+                $message->user_id = $user->id;
+                return response($message,200);
             }
-        } catch (RuntimeException $error) {
-            return response()->json(['error' => $error->getMessage()], HttpCode::BAD_REQUEST);
         }
-
-        return $this->respondWithError([__('messages.general-issue')]);
+        $message->result = false;
+        $message->message = 'Email Already Exist';
+        return response()->json(['message'=>$message,'status'=>200]);
     }
 
-    public function register(): JsonResponse
+    public function login(Request $request)
     {
-        $userRepository = new UserRepository();
+        $message = new User();
+        $user = User::where('email', $request->email)->first();
 
-        $data = request()->all();
-
-        try {
-            ValidationHelper::validate($data, [
-                'email' => 'required|unique:users|email',
-                'password' => 'required',
-                'name' => 'required',
-                'role' => 'required',
-            ]);
-
-            $user = $userRepository->registerUser($data);
-            $token = $user->createToken('passport-api')->accessToken;
-            $user->setRememberToken(base64_encode(Hash::make(time() . $user->email)));
-            if($user->save()) {
-                return $this->respond(['token' => $token], __('messages.registration-success'), 201);
-            }
-
-        } catch (RuntimeException $error) {
-            return $this->respondWithError(ValidationHelper::splitErrors($error->getMessage()));
+        if (! $user || ! Hash::check($request->password, $user->password)) {
+            $message->result = false;
+            $message->message = 'The provided credentials are incorrect.';
+        } else {
+            $message->result = true;
+            $message->name = $user->name ?? 'username';
+            $message->id = $user->id;
+            $message->email = $user->email;
+            $message->role = $user->role;
+            $message->token = $user->createToken(env('APP_TOKEN'))->accessToken;
         }
-        return $this->respondWithError([__('messages.general-issue')]);
+        return response()->json(['message'=>$message,'status'=>200]);
     }
 
-    public function resetPassword() {
-        $data = request()->all();
-
-        try {
-            ValidationHelper::validate($data,[
-                'email' => 'required|email'
-            ]);
-
-            // send an email with a reset password link?
-
-        } catch (RuntimeException $error) {
-            return $this->respondWithError(ValidationHelper::splitErrors($error->getMessage()));
-        }
-        return $this->respondWithError([__('messages.general-issue')]);
+    public function logout(Request $request){
+        $result = $request->user()->currentAccessToken()->delete(); //or Auth::user()
+        return $result;
     }
+
 
 }

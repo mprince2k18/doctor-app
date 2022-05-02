@@ -10,7 +10,6 @@ use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Mail\Mailer;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Reflector;
 use Illuminate\Support\Stringable;
@@ -18,6 +17,7 @@ use Illuminate\Support\Traits\Macroable;
 use Illuminate\Support\Traits\ReflectsClosures;
 use Psr\Http\Client\ClientExceptionInterface;
 use Symfony\Component\Process\Process;
+use Throwable;
 
 class Event
 {
@@ -188,55 +188,82 @@ class Event
      *
      * @param  \Illuminate\Contracts\Container\Container  $container
      * @return void
+     *
+     * @throws \Throwable
      */
     public function run(Container $container)
     {
-        if ($this->withoutOverlapping &&
-            ! $this->mutex->create($this)) {
+        if ($this->shouldSkipDueToOverlapping()) {
             return;
         }
 
-        $this->runInBackground
-                    ? $this->runCommandInBackground($container)
-                    : $this->runCommandInForeground($container);
+        $exitCode = $this->start($container);
+
+        if (! $this->runInBackground) {
+            $this->finish($container, $exitCode);
+        }
     }
 
     /**
-     * Get the mutex name for the scheduled command.
+     * Determine if the event should skip because another process is overlapping.
      *
-     * @return string
+     * @return bool
      */
-    public function mutexName()
+    public function shouldSkipDueToOverlapping()
     {
-        return 'framework'.DIRECTORY_SEPARATOR.'schedule-'.sha1($this->expression.$this->command);
+        return $this->withoutOverlapping && ! $this->mutex->create($this);
     }
 
     /**
-     * Run the command in the foreground.
-     *
-     * @param  \Illuminate\Contracts\Container\Container  $container
-     * @return void
-     */
-    protected function runCommandInForeground(Container $container)
-    {
-        $this->callBeforeCallbacks($container);
-
-        $this->exitCode = Process::fromShellCommandline($this->buildCommand(), base_path(), null, null, null)->run();
-
-        $this->callAfterCallbacks($container);
-    }
-
-    /**
-     * Run the command in the background.
+     * Run the command process.
      *
      * @param  \Illuminate\Contracts\Container\Container  $container
+     * @return int
+     *
+     * @throws \Throwable
+     */
+    protected function start($container)
+    {
+        try {
+            $this->callBeforeCallbacks($container);
+
+            return $this->execute($container);
+        } catch (Throwable $exception) {
+            $this->removeMutex();
+
+            throw $exception;
+        }
+    }
+
+    /**
+     * Run the command process.
+     *
+     * @param  \Illuminate\Contracts\Container\Container  $container
+     * @return int
+     */
+    protected function execute($container)
+    {
+        return Process::fromShellCommandline(
+            $this->buildCommand(), base_path(), null, null, null
+        )->run();
+    }
+
+    /**
+     * Mark the command process as finished and run callbacks/cleanup.
+     *
+     * @param  \Illuminate\Contracts\Container\Container  $container
+     * @param  int  $exitCode
      * @return void
      */
-    protected function runCommandInBackground(Container $container)
+    public function finish(Container $container, $exitCode)
     {
-        $this->callBeforeCallbacks($container);
+        $this->exitCode = (int) $exitCode;
 
-        Process::fromShellCommandline($this->buildCommand(), base_path(), null, null, null)->run();
+        try {
+            $this->callAfterCallbacks($container);
+        } finally {
+            $this->removeMutex();
+        }
     }
 
     /**
@@ -263,20 +290,6 @@ class Event
         foreach ($this->afterCallbacks as $callback) {
             $container->call($callback);
         }
-    }
-
-    /**
-     * Call all of the "after" callbacks for the event.
-     *
-     * @param  \Illuminate\Contracts\Container\Container  $container
-     * @param  int  $exitCode
-     * @return void
-     */
-    public function callAfterCallbacksWithExitCode(Container $container, $exitCode)
-    {
-        $this->exitCode = (int) $exitCode;
-
-        $this->callAfterCallbacks($container);
     }
 
     /**
@@ -322,10 +335,10 @@ class Event
      */
     protected function expressionPasses()
     {
-        $date = Carbon::now();
+        $date = Date::now();
 
         if ($this->timezone) {
-            $date->setTimezone($this->timezone);
+            $date = $date->setTimezone($this->timezone);
         }
 
         return (new CronExpression($this->expression))->isDue($date->toDateTimeString());
@@ -580,7 +593,7 @@ class Event
         return function (Container $container, HttpClient $http) use ($url) {
             try {
                 $http->request('GET', $url);
-            } catch (ClientExceptionInterface | TransferException $e) {
+            } catch (ClientExceptionInterface|TransferException $e) {
                 $container->make(ExceptionHandler::class)->report($e);
             }
         };
@@ -648,9 +661,7 @@ class Event
 
         $this->expiresAt = $expiresAt;
 
-        return $this->then(function () {
-            $this->mutex->forget($this);
-        })->skip(function () {
+        return $this->skip(function () {
             return $this->mutex->exists($this);
         });
     }
@@ -769,7 +780,7 @@ class Event
         }
 
         return $this->then(function (Container $container) use ($callback) {
-            if (0 === $this->exitCode) {
+            if ($this->exitCode === 0) {
                 $container->call($callback);
             }
         });
@@ -804,7 +815,7 @@ class Event
         }
 
         return $this->then(function (Container $container) use ($callback) {
-            if (0 !== $this->exitCode) {
+            if ($this->exitCode !== 0) {
                 $container->call($callback);
             }
         });
@@ -915,5 +926,27 @@ class Event
         $this->mutex = $mutex;
 
         return $this;
+    }
+
+    /**
+     * Get the mutex name for the scheduled command.
+     *
+     * @return string
+     */
+    public function mutexName()
+    {
+        return 'framework'.DIRECTORY_SEPARATOR.'schedule-'.sha1($this->expression.$this->command);
+    }
+
+    /**
+     * Delete the mutex for the event.
+     *
+     * @return void
+     */
+    protected function removeMutex()
+    {
+        if ($this->withoutOverlapping) {
+            $this->mutex->forget($this);
+        }
     }
 }

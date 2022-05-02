@@ -17,8 +17,8 @@ class CreatePrescriptionsTable extends Migration
             $table->id();
             $table->unsignedBigInteger('doctor_id');
             $table->unsignedBigInteger('patient_id');
+            $table->unsignedBigInteger('appointment_id');
             $table->string('date');
-            $table->string('time');
             $table->string('medicine');
             $table->string('dosage');
             $table->string('instruction');

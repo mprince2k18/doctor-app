@@ -52,7 +52,7 @@ class ComponentTagCompiler
      *
      * @param  array  $aliases
      * @param  array  $namespaces
-     * @param  \Illuminate\View\Compilers\BladeCompiler|null $blade
+     * @param  \Illuminate\View\Compilers\BladeCompiler|null  $blade
      * @return void
      */
     public function __construct(array $aliases = [], array $namespaces = [], ?BladeCompiler $blade = null)
@@ -216,7 +216,7 @@ class ComponentTagCompiler
             return [Str::camel($key) => $value];
         });
 
-        // If the component doesn't exists as a class we'll assume it's a class-less
+        // If the component doesn't exist as a class, we'll assume it's a class-less
         // component and pass the component as a view parameter to the data so it
         // can be accessed within the component and we can render out the view.
         if (! class_exists($class)) {
@@ -231,6 +231,9 @@ class ComponentTagCompiler
         }
 
         return "##BEGIN-COMPONENT-CLASS##@component('{$class}', '{$component}', [".$this->attributesToString($parameters, $escapeBound = false).'])
+<?php if (isset($attributes) && $constructor = (new ReflectionClass('.$class.'::class))->getConstructor()): ?>
+<?php $attributes = $attributes->except(collect($constructor->getParameters())->map->getName()->all()); ?>
+<?php endif; ?>
 <?php $component->withAttributes(['.$this->attributesToString($attributes->all(), $escapeAttributes = $class !== DynamicComponent::class).']); ?>';
     }
 
@@ -268,8 +271,29 @@ class ComponentTagCompiler
             return $class;
         }
 
-        if ($viewFactory->exists($view = $this->guessViewName($component))) {
-            return $view;
+        $guess = collect($this->blade->getAnonymousComponentNamespaces())
+            ->filter(function ($directory, $prefix) use ($component) {
+                return Str::startsWith($component, $prefix.'::');
+            })
+            ->prepend('components', $component)
+            ->reduce(function ($carry, $directory, $prefix) use ($component, $viewFactory) {
+                if (! is_null($carry)) {
+                    return $carry;
+                }
+
+                $componentName = Str::after($component, $prefix.'::');
+
+                if ($viewFactory->exists($view = $this->guessViewName($componentName, $directory))) {
+                    return $view;
+                }
+
+                if ($viewFactory->exists($view = $this->guessViewName($componentName, $directory).'.index')) {
+                    return $view;
+                }
+            });
+
+        if (! is_null($guess)) {
+            return $guess;
         }
 
         throw new InvalidArgumentException(
@@ -289,7 +313,7 @@ class ComponentTagCompiler
 
         $prefix = $segments[0];
 
-        if (! isset($this->namespaces[$prefix]) || ! isset($segments[1])) {
+        if (! isset($this->namespaces[$prefix], $segments[1])) {
             return;
         }
 
@@ -334,15 +358,18 @@ class ComponentTagCompiler
      * Guess the view name for the given component.
      *
      * @param  string  $name
+     * @param  string  $prefix
      * @return string
      */
-    public function guessViewName($name)
+    public function guessViewName($name, $prefix = 'components.')
     {
-        $prefix = 'components.';
+        if (! Str::endsWith($prefix, '.')) {
+            $prefix .= '.';
+        }
 
         $delimiter = ViewFinderInterface::HINT_PATH_DELIMITER;
 
-        if (Str::contains($name, $delimiter)) {
+        if (str_contains($name, $delimiter)) {
             return Str::replaceFirst($delimiter, $delimiter.$prefix, $name);
         }
 
@@ -358,7 +385,7 @@ class ComponentTagCompiler
      */
     public function partitionDataAndAttributes($class, array $attributes)
     {
-        // If the class doesn't exists, we'll assume it's a class-less component and
+        // If the class doesn't exist, we'll assume it is a class-less component and
         // return all of the attributes as both data and attributes since we have
         // now way to partition them. The user can exclude attributes manually.
         if (! class_exists($class)) {
@@ -395,14 +422,53 @@ class ComponentTagCompiler
      */
     public function compileSlots(string $value)
     {
-        $value = preg_replace_callback('/<\s*x[\-\:]slot\s+(:?)name=(?<name>(\"[^\"]+\"|\\\'[^\\\']+\\\'|[^\s>]+))\s*>/', function ($matches) {
-            $name = $this->stripQuotes($matches['name']);
+        $pattern = "/
+            <
+                \s*
+                x[\-\:]slot
+                (?:\:(?<inlineName>\w+))?
+                (?:\s+(:?)name=(?<name>(\"[^\"]+\"|\\\'[^\\\']+\\\'|[^\s>]+)))?
+                (?<attributes>
+                    (?:
+                        \s+
+                        (?:
+                            (?:
+                                \{\{\s*\\\$attributes(?:[^}]+?)?\s*\}\}
+                            )
+                            |
+                            (?:
+                                [\w\-:.@]+
+                                (
+                                    =
+                                    (?:
+                                        \\\"[^\\\"]*\\\"
+                                        |
+                                        \'[^\']*\'
+                                        |
+                                        [^\'\\\"=<>]+
+                                    )
+                                )?
+                            )
+                        )
+                    )*
+                    \s*
+                )
+                (?<![\/=\-])
+            >
+        /x";
 
-            if ($matches[1] !== ':') {
+        $value = preg_replace_callback($pattern, function ($matches) {
+            $name = $this->stripQuotes($matches['inlineName'] ?: $matches['name']);
+
+            if ($matches[2] !== ':') {
                 $name = "'{$name}'";
             }
 
-            return " @slot({$name}) ";
+            $this->boundAttributes = [];
+
+            $attributes = $this->getAttributesFromAttributeString($matches['attributes']);
+
+            return " @slot({$name}, null, [".$this->attributesToString($attributes).']) ';
         }, $value);
 
         return preg_replace('/<\/\s*x[\-\:]slot[^>]*>/', ' @endslot', $value);
@@ -452,7 +518,7 @@ class ComponentTagCompiler
 
             $value = $this->stripQuotes($value);
 
-            if (Str::startsWith($attribute, 'bind:')) {
+            if (str_starts_with($attribute, 'bind:')) {
                 $attribute = Str::after($attribute, 'bind:');
 
                 $this->boundAttributes[$attribute] = true;
@@ -460,7 +526,7 @@ class ComponentTagCompiler
                 $value = "'".$this->compileAttributeEchos($value)."'";
             }
 
-            if (Str::startsWith($attribute, '::')) {
+            if (str_starts_with($attribute, '::')) {
                 $attribute = substr($attribute, 1);
             }
 

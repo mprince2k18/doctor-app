@@ -33,7 +33,6 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
 // Help opcache.preload discover always-needed symbols
-class_exists(LegacyEventDispatcherProxy::class);
 class_exists(ControllerArgumentsEvent::class);
 class_exists(ControllerEvent::class);
 class_exists(ExceptionEvent::class);
@@ -61,17 +60,13 @@ class HttpKernel implements HttpKernelInterface, TerminableInterface
         $this->dispatcher = $dispatcher;
         $this->resolver = $resolver;
         $this->requestStack = $requestStack ?? new RequestStack();
-        $this->argumentResolver = $argumentResolver;
-
-        if (null === $this->argumentResolver) {
-            $this->argumentResolver = new ArgumentResolver();
-        }
+        $this->argumentResolver = $argumentResolver ?? new ArgumentResolver();
     }
 
     /**
      * {@inheritdoc}
      */
-    public function handle(Request $request, int $type = HttpKernelInterface::MAIN_REQUEST, bool $catch = true)
+    public function handle(Request $request, int $type = HttpKernelInterface::MAIN_REQUEST, bool $catch = true): Response
     {
         $request->headers->set('X-Php-Ob-Level', (string) ob_get_level());
 
@@ -250,7 +245,7 @@ class HttpKernel implements HttpKernelInterface, TerminableInterface
     /**
      * Returns a human-readable string for the specified variable.
      */
-    private function varToString($var): string
+    private function varToString(mixed $var): string
     {
         if (\is_object($var)) {
             return sprintf('an object of type %s', \get_class($var));

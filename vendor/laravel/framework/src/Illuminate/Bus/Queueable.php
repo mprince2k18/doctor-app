@@ -4,7 +4,6 @@ namespace Illuminate\Bus;
 
 use Closure;
 use Illuminate\Queue\CallQueuedClosure;
-use Illuminate\Queue\SerializableClosure;
 use Illuminate\Support\Arr;
 use RuntimeException;
 
@@ -128,7 +127,7 @@ trait Queueable
     }
 
     /**
-     * Set the desired delay for the job.
+     * Set the desired delay in seconds for the job.
      *
      * @param  \DateTimeInterface|\DateInterval|int|null  $delay
      * @return $this
@@ -245,7 +244,7 @@ trait Queueable
     public function invokeChainCatchCallbacks($e)
     {
         collect($this->chainCatchCallbacks)->each(function ($callback) use ($e) {
-            $callback instanceof SerializableClosure ? $callback->__invoke($e) : call_user_func($callback, $e);
+            $callback($e);
         });
     }
 }

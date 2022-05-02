@@ -39,18 +39,35 @@ class FlowdockHandler extends SocketHandler
     /**
      * @throws MissingExtensionException if OpenSSL is missing
      */
-    public function __construct(string $apiToken, $level = Logger::DEBUG, bool $bubble = true)
-    {
+    public function __construct(
+        string $apiToken,
+        $level = Logger::DEBUG,
+        bool $bubble = true,
+        bool $persistent = false,
+        float $timeout = 0.0,
+        float $writingTimeout = 10.0,
+        ?float $connectionTimeout = null,
+        ?int $chunkSize = null
+    ) {
         if (!extension_loaded('openssl')) {
             throw new MissingExtensionException('The OpenSSL PHP extension is required to use the FlowdockHandler');
         }
 
-        parent::__construct('ssl://api.flowdock.com:443', $level, $bubble);
+        parent::__construct(
+            'ssl://api.flowdock.com:443',
+            $level,
+            $bubble,
+            $persistent,
+            $timeout,
+            $writingTimeout,
+            $connectionTimeout,
+            $chunkSize
+        );
         $this->apiToken = $apiToken;
     }
 
     /**
-     * {@inheritdoc}
+     * {@inheritDoc}
      */
     public function setFormatter(FormatterInterface $formatter): HandlerInterface
     {
@@ -70,7 +87,7 @@ class FlowdockHandler extends SocketHandler
     }
 
     /**
-     * {@inheritdoc}
+     * {@inheritDoc}
      */
     protected function write(array $record): void
     {
@@ -80,7 +97,7 @@ class FlowdockHandler extends SocketHandler
     }
 
     /**
-     * {@inheritdoc}
+     * {@inheritDoc}
      */
     protected function generateDataStream(array $record): string
     {

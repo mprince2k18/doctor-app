@@ -46,7 +46,7 @@ class NormalizerFormatter implements FormatterInterface
     }
 
     /**
-     * {@inheritdoc}
+     * {@inheritDoc}
      *
      * @param mixed[] $record
      */
@@ -56,7 +56,7 @@ class NormalizerFormatter implements FormatterInterface
     }
 
     /**
-     * {@inheritdoc}
+     * {@inheritDoc}
      */
     public function formatBatch(array $records)
     {
@@ -267,13 +267,17 @@ class NormalizerFormatter implements FormatterInterface
         return $date->format($this->dateFormat);
     }
 
-    public function addJsonEncodeOption(int $option): void
+    public function addJsonEncodeOption(int $option): self
     {
         $this->jsonEncodeOptions |= $option;
+
+        return $this;
     }
 
-    public function removeJsonEncodeOption(int $option): void
+    public function removeJsonEncodeOption(int $option): self
     {
         $this->jsonEncodeOptions &= ~$option;
+
+        return $this;
     }
 }

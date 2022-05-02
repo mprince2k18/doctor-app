@@ -28,7 +28,7 @@ if (! function_exists('abort')) {
      * @param  \Symfony\Component\HttpFoundation\Response|\Illuminate\Contracts\Support\Responsable|int  $code
      * @param  string  $message
      * @param  array  $headers
-     * @return void
+     * @return never
      *
      * @throws \Symfony\Component\HttpKernel\Exception\HttpException
      * @throws \Symfony\Component\HttpKernel\Exception\NotFoundHttpException
@@ -228,7 +228,7 @@ if (! function_exists('cache')) {
      * @param  dynamic  key|key,default|data,expiration|null
      * @return mixed|\Illuminate\Cache\CacheManager
      *
-     * @throws \Exception
+     * @throws \InvalidArgumentException
      */
     function cache()
     {
@@ -243,7 +243,7 @@ if (! function_exists('cache')) {
         }
 
         if (! is_array($arguments[0])) {
-            throw new Exception(
+            throw new InvalidArgumentException(
                 'When setting a value in the cache, you must pass an array of key / value pairs.'
             );
         }
@@ -483,6 +483,19 @@ if (! function_exists('logger')) {
     }
 }
 
+if (! function_exists('lang_path')) {
+    /**
+     * Get the path to the language folder.
+     *
+     * @param  string  $path
+     * @return string
+     */
+    function lang_path($path = '')
+    {
+        return app()->langPath($path);
+    }
+}
+
 if (! function_exists('logs')) {
     /**
      * Get a log driver instance.
@@ -623,7 +636,7 @@ if (! function_exists('request')) {
      *
      * @param  array|string|null  $key
      * @param  mixed  $default
-     * @return \Illuminate\Http\Request|string|array|null
+     * @return mixed
      */
     function request($key = null, $default = null)
     {
@@ -787,7 +800,23 @@ if (! function_exists('storage_path')) {
      */
     function storage_path($path = '')
     {
-        return app('path.storage').($path ? DIRECTORY_SEPARATOR.$path : $path);
+        return app()->storagePath($path);
+    }
+}
+
+if (! function_exists('to_route')) {
+    /**
+     * Create a new redirect response to a named route.
+     *
+     * @param  string  $route
+     * @param  mixed  $parameters
+     * @param  int  $status
+     * @param  array  $headers
+     * @return \Illuminate\Http\RedirectResponse
+     */
+    function to_route($route, $parameters = [], $status = 302, $headers = [])
+    {
+        return redirect()->route($route, $parameters, $status, $headers);
     }
 }
 

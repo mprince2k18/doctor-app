@@ -8,6 +8,7 @@ use Illuminate\Contracts\Queue\QueueableCollection;
 use Illuminate\Contracts\Queue\QueueableEntity;
 use Illuminate\Contracts\Routing\UrlRoutable;
 use Illuminate\Contracts\Support\Arrayable;
+use Illuminate\Contracts\Support\CanBeEscapedWhenCastToString;
 use Illuminate\Contracts\Support\Jsonable;
 use Illuminate\Database\ConnectionResolverInterface as Resolver;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -21,9 +22,8 @@ use Illuminate\Support\Str;
 use Illuminate\Support\Traits\ForwardsCalls;
 use JsonSerializable;
 use LogicException;
-use ReturnTypeWillChange;
 
-abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jsonable, JsonSerializable, QueueableEntity, UrlRoutable
+abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToString, HasBroadcastChannel, Jsonable, JsonSerializable, QueueableEntity, UrlRoutable
 {
     use Concerns\HasAttributes,
         Concerns\HasEvents,
@@ -112,6 +112,13 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
     public $wasRecentlyCreated = false;
 
     /**
+     * Indicates that the object's string representation should be escaped when __toString is invoked.
+     *
+     * @var bool
+     */
+    protected $escapeWhenCastingToString = false;
+
+    /**
      * The connection resolver instance.
      *
      * @var \Illuminate\Database\ConnectionResolverInterface
@@ -166,6 +173,13 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      * @var callable|null
      */
     protected static $lazyLoadingViolationCallback;
+
+    /**
+     * Indicates if broadcasting is currently enabled.
+     *
+     * @var bool
+     */
+    protected static $isBroadcasting = true;
 
     /**
      * The name of the "created at" column.
@@ -370,12 +384,31 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
     /**
      * Register a callback that is responsible for handling lazy loading violations.
      *
-     * @param  callable  $callback
+     * @param  callable|null  $callback
      * @return void
      */
-    public static function handleLazyLoadingViolationUsing(callable $callback)
+    public static function handleLazyLoadingViolationUsing(?callable $callback)
     {
         static::$lazyLoadingViolationCallback = $callback;
+    }
+
+    /**
+     * Execute a callback without broadcasting any model events for all model types.
+     *
+     * @param  callable  $callback
+     * @return mixed
+     */
+    public static function withoutBroadcasting(callable $callback)
+    {
+        $isBroadcasting = static::$isBroadcasting;
+
+        static::$isBroadcasting = false;
+
+        try {
+            return $callback();
+        } finally {
+            static::$isBroadcasting = $isBroadcasting;
+        }
     }
 
     /**
@@ -428,11 +461,24 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      */
     public function qualifyColumn($column)
     {
-        if (Str::contains($column, '.')) {
+        if (str_contains($column, '.')) {
             return $column;
         }
 
         return $this->getTable().'.'.$column;
+    }
+
+    /**
+     * Qualify the given columns with the model's table.
+     *
+     * @param  array  $columns
+     * @return array
+     */
+    public function qualifyColumns($columns)
+    {
+        return collect($columns)->map(function ($column) {
+            return $this->qualifyColumn($column);
+        })->all();
     }
 
     /**
@@ -447,7 +493,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
         // This method just provides a convenient way for us to generate fresh model
         // instances of this current model. It is particularly useful during the
         // hydration of new objects via the Eloquent query builder instances.
-        $model = new static((array) $attributes);
+        $model = new static;
 
         $model->exists = $exists;
 
@@ -458,6 +504,8 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
         $model->setTable($this->getTable());
 
         $model->mergeCasts($this->casts);
+
+        $model->fill((array) $attributes);
 
         return $model;
     }
@@ -514,7 +562,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      * Get all of the models from the database.
      *
      * @param  array|mixed  $columns
-     * @return \Illuminate\Database\Eloquent\Collection|static[]
+     * @return \Illuminate\Database\Eloquent\Collection<int, static>
      */
     public static function all($columns = ['*'])
     {
@@ -840,6 +888,24 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
     }
 
     /**
+     * Update the model in the database within a transaction.
+     *
+     * @param  array  $attributes
+     * @param  array  $options
+     * @return bool
+     *
+     * @throws \Throwable
+     */
+    public function updateOrFail(array $attributes = [], array $options = [])
+    {
+        if (! $this->exists) {
+            return false;
+        }
+
+        return $this->fill($attributes)->saveOrFail($options);
+    }
+
+    /**
      * Update the model in the database without raising any events.
      *
      * @param  array  $attributes
@@ -904,7 +970,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      */
     public function save(array $options = [])
     {
-        $this->mergeAttributesFromClassCasts();
+        $this->mergeAttributesFromCachedCasts();
 
         $query = $this->newModelQuery();
 
@@ -946,7 +1012,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
     }
 
     /**
-     * Save the model to the database using transaction.
+     * Save the model to the database within a transaction.
      *
      * @param  array  $options
      * @return bool
@@ -1173,7 +1239,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      */
     public function delete()
     {
-        $this->mergeAttributesFromClassCasts();
+        $this->mergeAttributesFromCachedCasts();
 
         if (is_null($this->getKeyName())) {
             throw new LogicException('No primary key defined on model.');
@@ -1203,6 +1269,24 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
         $this->fireModelEvent('deleted', false);
 
         return true;
+    }
+
+    /**
+     * Delete the model from the database within a transaction.
+     *
+     * @return bool|null
+     *
+     * @throws \Throwable
+     */
+    public function deleteOrFail()
+    {
+        if (! $this->exists) {
+            return false;
+        }
+
+        return $this->getConnection()->transaction(function () {
+            return $this->delete();
+        });
     }
 
     /**
@@ -1415,7 +1499,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
     {
         $json = json_encode($this->jsonSerialize(), $options);
 
-        if (JSON_ERROR_NONE !== json_last_error()) {
+        if (json_last_error() !== JSON_ERROR_NONE) {
             throw JsonEncodingException::forModel($this, json_last_error_msg());
         }
 
@@ -1427,8 +1511,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      *
      * @return array
      */
-    #[ReturnTypeWillChange]
-    public function jsonSerialize()
+    public function jsonSerialize(): array
     {
         return $this->toArray();
     }
@@ -1446,6 +1529,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
         }
 
         return $this->setKeysForSelectQuery($this->newQueryWithoutScopes())
+                        ->useWritePdo()
                         ->with(is_string($with) ? func_get_args() : $with)
                         ->first();
     }
@@ -1462,7 +1546,10 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
         }
 
         $this->setRawAttributes(
-            $this->setKeysForSelectQuery($this->newQueryWithoutScopes())->firstOrFail()->attributes
+            $this->setKeysForSelectQuery($this->newQueryWithoutScopes())
+                ->useWritePdo()
+                ->firstOrFail()
+                ->attributes
         );
 
         $this->load(collect($this->relations)->reject(function ($relation) {
@@ -1747,7 +1834,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
             }
 
             if ($relation instanceof QueueableEntity) {
-                foreach ($relation->getQueueableRelations() as $entityKey => $entityValue) {
+                foreach ($relation->getQueueableRelations() as $entityValue) {
                     $relations[] = $key.'.'.$entityValue;
                 }
             }
@@ -1795,7 +1882,19 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      */
     public function resolveRouteBinding($value, $field = null)
     {
-        return $this->where($field ?? $this->getRouteKeyName(), $value)->first();
+        return $this->resolveRouteBindingQuery($this, $value, $field)->first();
+    }
+
+    /**
+     * Retrieve the model for a bound value.
+     *
+     * @param  mixed  $value
+     * @param  string|null  $field
+     * @return \Illuminate\Database\Eloquent\Model|null
+     */
+    public function resolveSoftDeletableRouteBinding($value, $field = null)
+    {
+        return $this->resolveRouteBindingQuery($this, $value, $field)->withTrashed()->first();
     }
 
     /**
@@ -1808,16 +1907,57 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      */
     public function resolveChildRouteBinding($childType, $value, $field)
     {
+        return $this->resolveChildRouteBindingQuery($childType, $value, $field)->first();
+    }
+
+    /**
+     * Retrieve the child model for a bound value.
+     *
+     * @param  string  $childType
+     * @param  mixed  $value
+     * @param  string|null  $field
+     * @return \Illuminate\Database\Eloquent\Model|null
+     */
+    public function resolveSoftDeletableChildRouteBinding($childType, $value, $field)
+    {
+        return $this->resolveChildRouteBindingQuery($childType, $value, $field)->withTrashed()->first();
+    }
+
+    /**
+     * Retrieve the child model query for a bound value.
+     *
+     * @param  string  $childType
+     * @param  mixed  $value
+     * @param  string|null  $field
+     * @return \Illuminate\Database\Eloquent\Relations\Relation
+     */
+    protected function resolveChildRouteBindingQuery($childType, $value, $field)
+    {
         $relationship = $this->{Str::plural(Str::camel($childType))}();
 
         $field = $field ?: $relationship->getRelated()->getRouteKeyName();
 
         if ($relationship instanceof HasManyThrough ||
             $relationship instanceof BelongsToMany) {
-            return $relationship->where($relationship->getRelated()->getTable().'.'.$field, $value)->first();
-        } else {
-            return $relationship->where($field, $value)->first();
+            $field = $relationship->getRelated()->getTable().'.'.$field;
         }
+
+        return $relationship instanceof Model
+                ? $relationship->resolveRouteBindingQuery($relationship, $value, $field)
+                : $relationship->getRelated()->resolveRouteBindingQuery($relationship, $value, $field);
+    }
+
+    /**
+     * Retrieve the model for a bound value.
+     *
+     * @param  \Illuminate\Database\Eloquent\Model|\Illuminate\Database\Eloquent\Relations\Relation  $query
+     * @param  mixed  $value
+     * @param  string|null  $field
+     * @return \Illuminate\Database\Eloquent\Relations\Relation
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return $query->where($field ?? $this->getRouteKeyName(), $value);
     }
 
     /**
@@ -1912,7 +2052,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      * @param  mixed  $offset
      * @return bool
      */
-    public function offsetExists($offset)
+    public function offsetExists($offset): bool
     {
         return ! is_null($this->getAttribute($offset));
     }
@@ -1923,7 +2063,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      * @param  mixed  $offset
      * @return mixed
      */
-    public function offsetGet($offset)
+    public function offsetGet($offset): mixed
     {
         return $this->getAttribute($offset);
     }
@@ -1935,7 +2075,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      * @param  mixed  $value
      * @return void
      */
-    public function offsetSet($offset, $value)
+    public function offsetSet($offset, $value): void
     {
         $this->setAttribute($offset, $value);
     }
@@ -1946,7 +2086,7 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      * @param  mixed  $offset
      * @return void
      */
-    public function offsetUnset($offset)
+    public function offsetUnset($offset): void
     {
         unset($this->attributes[$offset], $this->relations[$offset]);
     }
@@ -2012,7 +2152,22 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      */
     public function __toString()
     {
-        return $this->toJson();
+        return $this->escapeWhenCastingToString
+                    ? e($this->toJson())
+                    : $this->toJson();
+    }
+
+    /**
+     * Indicate that the object's string representation should be escaped when __toString is invoked.
+     *
+     * @param  bool  $escape
+     * @return $this
+     */
+    public function escapeWhenCastingToString($escape = true)
+    {
+        $this->escapeWhenCastingToString = $escape;
+
+        return $this;
     }
 
     /**
@@ -2022,9 +2177,10 @@ abstract class Model implements Arrayable, ArrayAccess, HasBroadcastChannel, Jso
      */
     public function __sleep()
     {
-        $this->mergeAttributesFromClassCasts();
+        $this->mergeAttributesFromCachedCasts();
 
         $this->classCastCache = [];
+        $this->attributeCastCache = [];
 
         return array_keys(get_object_vars($this));
     }

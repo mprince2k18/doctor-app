@@ -45,7 +45,7 @@ trait TestDatabases
                 Testing\RefreshDatabase::class,
             ];
 
-            if (Arr::hasAny($uses, $databaseTraits)) {
+            if (Arr::hasAny($uses, $databaseTraits) && ! ParallelTesting::option('without_databases')) {
                 $this->whenNotUsingInMemoryDatabase(function ($database) use ($uses) {
                     [$testDatabase, $created] = $this->ensureTestDatabaseExists($database);
 
@@ -61,13 +61,22 @@ trait TestDatabases
                 });
             }
         });
+
+        ParallelTesting::tearDownProcess(function () {
+            $this->whenNotUsingInMemoryDatabase(function ($database) {
+                if (ParallelTesting::option('drop_databases')) {
+                    Schema::dropDatabaseIfExists(
+                        $this->testDatabase($database)
+                    );
+                }
+            });
+        });
     }
 
     /**
      * Ensure a test database exists and returns its name.
      *
      * @param  string  $database
-     *
      * @return array
      */
     protected function ensureTestDatabaseExists($database)

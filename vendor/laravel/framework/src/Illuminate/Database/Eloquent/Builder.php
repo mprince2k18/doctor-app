@@ -5,15 +5,14 @@ namespace Illuminate\Database\Eloquent;
 use BadMethodCallException;
 use Closure;
 use Exception;
+use Illuminate\Contracts\Database\Eloquent\Builder as BuilderContract;
 use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Database\Concerns\BuildsQueries;
-use Illuminate\Database\Concerns\ExplainsQueries;
+use Illuminate\Database\Eloquent\Concerns\QueriesRelationships;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Database\RecordsNotFoundException;
-use Illuminate\Pagination\CursorPaginationException;
-use Illuminate\Pagination\CursorPaginator;
 use Illuminate\Pagination\Paginator;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
@@ -23,14 +22,15 @@ use ReflectionMethod;
 
 /**
  * @property-read HigherOrderBuilderProxy $orWhere
+ * @property-read HigherOrderBuilderProxy $whereNot
+ * @property-read HigherOrderBuilderProxy $orWhereNot
  *
  * @mixin \Illuminate\Database\Query\Builder
  */
-class Builder
+class Builder implements BuilderContract
 {
-    use Concerns\QueriesRelationships, ExplainsQueries, ForwardsCalls;
-    use BuildsQueries {
-        sole as baseSole;
+    use BuildsQueries, ForwardsCalls, QueriesRelationships {
+        BuildsQueries::sole as baseSole;
     }
 
     /**
@@ -76,11 +76,21 @@ class Builder
     protected $onDelete;
 
     /**
+     * The properties that should be returned from query builder.
+     *
+     * @var string[]
+     */
+    protected $propertyPassthru = [
+        'from',
+    ];
+
+    /**
      * The methods that should be returned from query builder.
      *
      * @var string[]
      */
     protected $passthru = [
+        'aggregate',
         'average',
         'avg',
         'count',
@@ -88,6 +98,7 @@ class Builder
         'doesntExist',
         'dump',
         'exists',
+        'explain',
         'getBindings',
         'getConnection',
         'getGrammar',
@@ -287,7 +298,7 @@ class Builder
      */
     public function firstWhere($column, $operator = null, $value = null, $boolean = 'and')
     {
-        return $this->where($column, $operator, $value, $boolean)->first();
+        return $this->where(...func_get_args())->first();
     }
 
     /**
@@ -305,6 +316,33 @@ class Builder
         );
 
         return $this->where($column, $operator, $value, 'or');
+    }
+
+    /**
+     * Add a basic "where not" clause to the query.
+     *
+     * @param  \Closure|string|array|\Illuminate\Database\Query\Expression  $column
+     * @param  mixed  $operator
+     * @param  mixed  $value
+     * @param  string  $boolean
+     * @return $this
+     */
+    public function whereNot($column, $operator = null, $value = null, $boolean = 'and')
+    {
+        return $this->where($column, $operator, $value, $boolean.' not');
+    }
+
+    /**
+     * Add an "or where not" clause to the query.
+     *
+     * @param  \Closure|array|string|\Illuminate\Database\Query\Expression  $column
+     * @param  mixed  $operator
+     * @param  mixed  $value
+     * @return $this
+     */
+    public function orWhereNot($column, $operator = null, $value = null)
+    {
+        return $this->whereNot($column, $operator, $value, 'or');
     }
 
     /**
@@ -417,7 +455,7 @@ class Builder
      * @param  array  $columns
      * @return \Illuminate\Database\Eloquent\Model|\Illuminate\Database\Eloquent\Collection|static|static[]
      *
-     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException
+     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException<\Illuminate\Database\Eloquent\Model>
      */
     public function findOrFail($id, $columns = ['*'])
     {
@@ -426,16 +464,22 @@ class Builder
         $id = $id instanceof Arrayable ? $id->toArray() : $id;
 
         if (is_array($id)) {
-            if (count($result) === count(array_unique($id))) {
-                return $result;
+            if (count($result) !== count(array_unique($id))) {
+                throw (new ModelNotFoundException)->setModel(
+                    get_class($this->model), array_diff($id, $result->modelKeys())
+                );
             }
-        } elseif (! is_null($result)) {
+
             return $result;
         }
 
-        throw (new ModelNotFoundException)->setModel(
-            get_class($this->model), $id
-        );
+        if (is_null($result)) {
+            throw (new ModelNotFoundException)->setModel(
+                get_class($this->model), $id
+            );
+        }
+
+        return $result;
     }
 
     /**
@@ -467,7 +511,7 @@ class Builder
             return $instance;
         }
 
-        return $this->newModelInstance($attributes + $values);
+        return $this->newModelInstance(array_merge($attributes, $values));
     }
 
     /**
@@ -483,7 +527,7 @@ class Builder
             return $instance;
         }
 
-        return tap($this->newModelInstance($attributes + $values), function ($instance) {
+        return tap($this->newModelInstance(array_merge($attributes, $values)), function ($instance) {
             $instance->save();
         });
     }
@@ -508,7 +552,7 @@ class Builder
      * @param  array  $columns
      * @return \Illuminate\Database\Eloquent\Model|static
      *
-     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException
+     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException<\Illuminate\Database\Eloquent\Model>
      */
     public function firstOrFail($columns = ['*'])
     {
@@ -547,7 +591,7 @@ class Builder
      * @param  array|string  $columns
      * @return \Illuminate\Database\Eloquent\Model
      *
-     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException
+     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException<\Illuminate\Database\Eloquent\Model>
      * @throws \Illuminate\Database\MultipleRecordsFoundException
      */
     public function sole($columns = ['*'])
@@ -570,6 +614,33 @@ class Builder
         if ($result = $this->first([$column])) {
             return $result->{Str::afterLast($column, '.')};
         }
+    }
+
+    /**
+     * Get a single column's value from the first result of a query if it's the sole matching record.
+     *
+     * @param  string|\Illuminate\Database\Query\Expression  $column
+     * @return mixed
+     *
+     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException<\Illuminate\Database\Eloquent\Model>
+     * @throws \Illuminate\Database\MultipleRecordsFoundException
+     */
+    public function soleValue($column)
+    {
+        return $this->sole([$column])->{Str::afterLast($column, '.')};
+    }
+
+    /**
+     * Get a single column's value from the first result of the query or throw an exception.
+     *
+     * @param  string|\Illuminate\Database\Query\Expression  $column
+     * @return mixed
+     *
+     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException<\Illuminate\Database\Eloquent\Model>
+     */
+    public function valueOrFail($column)
+    {
+        return $this->firstOrFail([$column])->{Str::afterLast($column, '.')};
     }
 
     /**
@@ -617,7 +688,7 @@ class Builder
             // For nested eager loads we'll skip loading them here and they will be set as an
             // eager load on the query to retrieve the relation so that they will be eager
             // loaded on that query, because that is where they get hydrated as models.
-            if (strpos($name, '.') === false) {
+            if (! str_contains($name, '.')) {
                 $models = $this->eagerLoadRelation($models, $name, $constraints);
             }
         }
@@ -715,7 +786,7 @@ class Builder
      */
     protected function isNestedUnder($relation, $name)
     {
-        return Str::contains($name, '.') && Str::startsWith($name, $relation.'.');
+        return str_contains($name, '.') && str_starts_with($name, $relation.'.');
     }
 
     /**
@@ -826,39 +897,14 @@ class Builder
      * @param  int|null  $perPage
      * @param  array  $columns
      * @param  string  $cursorName
-     * @param  string|null  $cursor
+     * @param  \Illuminate\Pagination\Cursor|string|null  $cursor
      * @return \Illuminate\Contracts\Pagination\CursorPaginator
-     * @throws \Illuminate\Pagination\CursorPaginationException
      */
     public function cursorPaginate($perPage = null, $columns = ['*'], $cursorName = 'cursor', $cursor = null)
     {
-        $cursor = $cursor ?: CursorPaginator::resolveCurrentCursor($cursorName);
-
         $perPage = $perPage ?: $this->model->getPerPage();
 
-        $orders = $this->ensureOrderForCursorPagination(! is_null($cursor) && $cursor->pointsToPreviousItems());
-
-        $orderDirection = $orders->first()['direction'] ?? 'asc';
-
-        $comparisonOperator = $orderDirection === 'asc' ? '>' : '<';
-
-        $parameters = $orders->pluck('column')->toArray();
-
-        if (! is_null($cursor)) {
-            if (count($parameters) === 1) {
-                $this->where($column = $parameters[0], $comparisonOperator, $cursor->parameter($column));
-            } elseif (count($parameters) > 1) {
-                $this->whereRowValues($parameters, $comparisonOperator, $cursor->parameters($parameters));
-            }
-        }
-
-        $this->take($perPage + 1);
-
-        return $this->cursorPaginator($this->get($columns), $perPage, $cursor, [
-            'path' => Paginator::resolveCurrentPath(),
-            'cursorName' => $cursorName,
-            'parameters' => $parameters,
-        ]);
+        return $this->paginateUsingCursor($perPage, $columns, $cursorName, $cursor);
     }
 
     /**
@@ -866,18 +912,10 @@ class Builder
      *
      * @param  bool  $shouldReverse
      * @return \Illuminate\Support\Collection
-     *
-     * @throws \Illuminate\Pagination\CursorPaginationException
      */
     protected function ensureOrderForCursorPagination($shouldReverse = false)
     {
-        $orderDirections = collect($this->query->orders)->pluck('direction')->unique();
-
-        if ($orderDirections->count() > 1) {
-            throw new CursorPaginationException('Only a single order by direction is supported when using cursor pagination.');
-        }
-
-        if ($orderDirections->count() === 0) {
+        if (empty($this->query->orders) && empty($this->query->unionOrders)) {
             $this->enforceOrderBy();
         }
 
@@ -887,6 +925,10 @@ class Builder
 
                 return $order;
             })->toArray();
+        }
+
+        if ($this->query->unionOrders) {
+            return collect($this->query->unionOrders);
         }
 
         return collect($this->query->orders);
@@ -1012,7 +1054,7 @@ class Builder
 
         $qualifiedColumn = end($segments).'.'.$column;
 
-        $values[$qualifiedColumn] = $values[$column];
+        $values[$qualifiedColumn] = Arr::get($values, $qualifiedColumn, $values[$column]);
 
         unset($values[$column]);
 
@@ -1204,7 +1246,7 @@ class Builder
         $originalWhereCount = is_null($query->wheres)
                     ? 0 : count($query->wheres);
 
-        $result = $scope(...array_values($parameters)) ?? $this;
+        $result = $scope(...$parameters) ?? $this;
 
         if (count((array) $query->wheres) > $originalWhereCount) {
             $this->addNewWheresWithinGroup($query, $originalWhereCount);
@@ -1369,7 +1411,7 @@ class Builder
             if (is_numeric($name)) {
                 $name = $constraints;
 
-                [$name, $constraints] = Str::contains($name, ':')
+                [$name, $constraints] = str_contains($name, ':')
                             ? $this->createSelectWithConstraint($name)
                             : [$name, static function () {
                                 //
@@ -1397,7 +1439,7 @@ class Builder
     {
         return [explode(':', $name)[0], static function ($query) use ($name) {
             $query->select(array_map(static function ($column) use ($query) {
-                if (Str::contains($column, '.')) {
+                if (str_contains($column, '.')) {
                     return $column;
                 }
 
@@ -1505,6 +1547,16 @@ class Builder
     }
 
     /**
+     * Flush the relationships being eagerly loaded.
+     *
+     * @return $this
+     */
+    public function withoutEagerLoads()
+    {
+        return $this->setEagerLoads([]);
+    }
+
+    /**
      * Get the default key name of the table.
      *
      * @return string
@@ -1548,6 +1600,17 @@ class Builder
     public function qualifyColumn($column)
     {
         return $this->model->qualifyColumn($column);
+    }
+
+    /**
+     * Qualify the given columns with the model's table.
+     *
+     * @param  array|\Illuminate\Database\Query\Expression  $columns
+     * @return array
+     */
+    public function qualifyColumns($columns)
+    {
+        return $this->model->qualifyColumns($columns);
     }
 
     /**
@@ -1604,8 +1667,12 @@ class Builder
      */
     public function __get($key)
     {
-        if ($key === 'orWhere') {
+        if (in_array($key, ['orWhere', 'whereNot', 'orWhereNot'])) {
             return new HigherOrderBuilderProxy($this, $key);
+        }
+
+        if (in_array($key, $this->propertyPassthru)) {
+            return $this->toBase()->{$key};
         }
 
         throw new Exception("Property [{$key}] does not exist on the Eloquent builder instance.");

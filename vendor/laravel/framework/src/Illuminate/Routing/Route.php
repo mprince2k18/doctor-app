@@ -14,8 +14,8 @@ use Illuminate\Routing\Matching\UriValidator;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
 use Illuminate\Support\Traits\Macroable;
+use Laravel\SerializableClosure\SerializableClosure;
 use LogicException;
-use Opis\Closure\SerializableClosure;
 use ReflectionFunction;
 use Symfony\Component\Routing\Route as SymfonyRoute;
 
@@ -92,6 +92,13 @@ class Route
      * @var array
      */
     protected $originalParameters;
+
+    /**
+     * Indicates "trashed" models can be retrieved when resolving implicit model bindings for this route.
+     *
+     * @var bool
+     */
+    protected $withTrashedBindings = false;
 
     /**
      * Indicates the maximum number of seconds the route should acquire a session lock for.
@@ -263,12 +270,22 @@ class Route
     public function getController()
     {
         if (! $this->controller) {
-            $class = $this->parseControllerCallback()[0];
+            $class = $this->getControllerClass();
 
             $this->controller = $this->container->make(ltrim($class, '\\'));
         }
 
         return $this->controller;
+    }
+
+    /**
+     * Get the controller class used for the route.
+     *
+     * @return string
+     */
+    public function getControllerClass()
+    {
+        return $this->parseControllerCallback()[0];
     }
 
     /**
@@ -498,12 +515,16 @@ class Route
     /**
      * Get the parameters that are listed in the route / controller signature.
      *
-     * @param  string|null  $subClass
+     * @param  array  $conditions
      * @return array
      */
-    public function signatureParameters($subClass = null)
+    public function signatureParameters($conditions = [])
     {
-        return RouteSignatureParameters::fromAction($this->action, $subClass);
+        if (is_string($conditions)) {
+            $conditions = ['subClass' => $conditions];
+        }
+
+        return RouteSignatureParameters::fromAction($this->action, $conditions);
     }
 
     /**
@@ -557,6 +578,29 @@ class Route
         }
 
         return array_values($this->parameters)[$key - 1];
+    }
+
+    /**
+     * Allow "trashed" models to be retrieved when resolving implicit model bindings for this route.
+     *
+     * @param  bool  $withTrashed
+     * @return $this
+     */
+    public function withTrashed($withTrashed = true)
+    {
+        $this->withTrashedBindings = $withTrashed;
+
+        return $this;
+    }
+
+    /**
+     * Determines if the route allows "trashed" models to be retrieved when resolving implicit model bindings.
+     *
+     * @return bool
+     */
+    public function allowsTrashedBindings()
+    {
+        return $this->withTrashedBindings;
     }
 
     /**
@@ -746,7 +790,7 @@ class Route
      */
     public function prefix($prefix)
     {
-        $prefix = $prefix ?? '';
+        $prefix ??= '';
 
         $this->updatePrefixOnAction($prefix);
 
@@ -880,7 +924,7 @@ class Route
     {
         $groupStack = last($this->router->getGroupStack());
 
-        if (isset($groupStack['namespace']) && strpos($action, '\\') !== 0) {
+        if (isset($groupStack['namespace']) && ! str_starts_with($action, '\\')) {
             return $groupStack['namespace'].'\\'.$action;
         }
 
@@ -945,9 +989,9 @@ class Route
         $missing = $this->action['missing'] ?? null;
 
         return is_string($missing) &&
-            Str::startsWith($missing, 'C:32:"Opis\\Closure\\SerializableClosure')
-                ? unserialize($missing)
-                : $missing;
+            Str::startsWith($missing, [
+                'O:47:"Laravel\\SerializableClosure\\SerializableClosure',
+            ]) ? unserialize($missing) : $missing;
     }
 
     /**
@@ -993,8 +1037,12 @@ class Route
             return (array) ($this->action['middleware'] ?? []);
         }
 
-        if (is_string($middleware)) {
+        if (! is_array($middleware)) {
             $middleware = func_get_args();
+        }
+
+        foreach ($middleware as $index => $value) {
+            $middleware[$index] = (string) $value;
         }
 
         $this->action['middleware'] = array_merge(
@@ -1002,6 +1050,20 @@ class Route
         );
 
         return $this;
+    }
+
+    /**
+     * Specify that the "Authorize" / "can" middleware should be applied to the route with the given options.
+     *
+     * @param  string  $ability
+     * @param  array|string  $models
+     * @return $this
+     */
+    public function can($ability, $models = [])
+    {
+        return empty($models)
+                    ? $this->middleware(['can:'.$ability])
+                    : $this->middleware(['can:'.$ability.','.implode(',', Arr::wrap($models))]);
     }
 
     /**
@@ -1043,6 +1105,28 @@ class Route
     public function excludedMiddleware()
     {
         return (array) ($this->action['excluded_middleware'] ?? []);
+    }
+
+    /**
+     * Indicate that the route should enforce scoping of multiple implicit Eloquent bindings.
+     *
+     * @return $this
+     */
+    public function scopeBindings()
+    {
+        $this->action['scope_bindings'] = true;
+
+        return $this;
+    }
+
+    /**
+     * Determine if the route should enforce scoping of multiple implicit Eloquent bindings.
+     *
+     * @return bool
+     */
+    public function enforcesScopedBindings()
+    {
+        return (bool) ($this->action['scope_bindings'] ?? false);
     }
 
     /**
@@ -1133,7 +1217,7 @@ class Route
     {
         return new SymfonyRoute(
             preg_replace('/\{(\w+?)\?\}/', '{$1}', $this->uri()), $this->getOptionalParameterNames(),
-            $this->wheres, ['utf8' => true, 'action' => $this->action],
+            $this->wheres, ['utf8' => true],
             $this->getDomain() ?: '', [], $this->methods
         );
     }
@@ -1196,11 +1280,15 @@ class Route
     public function prepareForSerialization()
     {
         if ($this->action['uses'] instanceof Closure) {
-            $this->action['uses'] = serialize(new SerializableClosure($this->action['uses']));
+            $this->action['uses'] = serialize(
+                new SerializableClosure($this->action['uses'])
+            );
         }
 
         if (isset($this->action['missing']) && $this->action['missing'] instanceof Closure) {
-            $this->action['missing'] = serialize(new SerializableClosure($this->action['missing']));
+            $this->action['missing'] = serialize(
+                new SerializableClosure($this->action['missing'])
+            );
         }
 
         $this->compileRoute();

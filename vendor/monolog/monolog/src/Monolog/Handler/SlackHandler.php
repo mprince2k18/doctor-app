@@ -59,13 +59,27 @@ class SlackHandler extends SocketHandler
         bool $bubble = true,
         bool $useShortAttachment = false,
         bool $includeContextAndExtra = false,
-        array $excludeFields = array()
+        array $excludeFields = array(),
+        bool $persistent = false,
+        float $timeout = 0.0,
+        float $writingTimeout = 10.0,
+        ?float $connectionTimeout = null,
+        ?int $chunkSize = null
     ) {
         if (!extension_loaded('openssl')) {
             throw new MissingExtensionException('The OpenSSL PHP extension is required to use the SlackHandler');
         }
 
-        parent::__construct('ssl://slack.com:443', $level, $bubble);
+        parent::__construct(
+            'ssl://slack.com:443',
+            $level,
+            $bubble,
+            $persistent,
+            $timeout,
+            $writingTimeout,
+            $connectionTimeout,
+            $chunkSize
+        );
 
         $this->slackRecord = new SlackRecord(
             $channel,
@@ -91,7 +105,7 @@ class SlackHandler extends SocketHandler
     }
 
     /**
-     * {@inheritdoc}
+     * {@inheritDoc}
      */
     protected function generateDataStream(array $record): string
     {
@@ -143,7 +157,7 @@ class SlackHandler extends SocketHandler
     }
 
     /**
-     * {@inheritdoc}
+     * {@inheritDoc}
      */
     protected function write(array $record): void
     {
